@@ -32,3 +32,14 @@
 **다음 할 일**
 - Supabase·Vercel 설정 (`web/README.md`) 후 배포, 휴대폰 3종으로 확인
 - 가족 시범 세션 → 결과를 가명으로 `pilot/`에 요약
+
+## 2026-11-25 (저녁)
+**한 일**
+- Supabase·Vercel 배포 (https://startup-moaon-project.vercel.app)
+- 배포 후 문제 해결: DB 비밀번호 인증 오류(28P01), 빈 녹음이 '미뤄 둠'으로 남던 문제 → '소리 없음'으로 처리하고 같은 질문을 다시 여쭘
+- 진단 도구: `/api/health`(DB·저장소·BAZE 키 상태), 전사 실패 사유·바이트 수 표시
+- 작업 정리: `docs/contributions/`
+
+**다음 할 일**
+- 실제 말소리로 휴대폰 3종 재확인, 팀원 BAZE 키 추가
+- 가족 시범 세션
