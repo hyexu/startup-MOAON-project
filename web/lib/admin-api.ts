@@ -5,8 +5,11 @@ import { envList, CONFIG } from "./config";
 import { copyDefaultSeeds, PERIODS } from "./seeds";
 import { createLink, revokeLink } from "./tokens";
 import { blankMemory, saveMemory, type MemoryState } from "./memory";
-import { aiMode } from "./ai-mode";
+import { aiMode, creditSnapshot, setSetting } from "./ai-mode";
+import { audioSeconds, toSttFormat } from "./audio";
+import { sessions } from "./db/schema";
 import { pcmToMp3 } from "./audio";
+import { BazeError } from "./baze/client";
 import { recordUsage } from "./usage";
 import type { TurnDeps } from "./turn";
 
@@ -134,6 +137,63 @@ const routes: [string, RegExp, Handler][] = [
     return ok({ url: l.url, expiresAt: l.expiresAt, message: linkMessage(p.honorific, l.url) });
   }],
   ["POST", /^\/links\/(\d+)\/revoke$/, async (m, _b, d) => { await revokeLink(d.db, Number(m[1])); return ok({ ok: true }); }],
+  ["GET", /^\/parents\/(\d+)\/sessions$/, async (m, _b, d) => {
+    const parentId = Number(m[1]);
+    const ss = await d.db.select().from(sessions).where(eq(sessions.parentId, parentId)).orderBy(desc(sessions.id));
+    const ts = await d.db.select().from(turns).where(eq(turns.parentId, parentId)).orderBy(asc(turns.seq));
+    return ok(await Promise.all(ss.map(async (s) => ({
+      id: s.id, startedAt: s.startedAt, endedAt: s.endedAt, summary: s.summary,
+      turns: await Promise.all(ts.filter((t) => t.sessionId === s.id).map(async (t) => ({
+        id: t.id, seq: t.seq, question: t.question, source: t.questionSource, command: t.command, stt: t.stt,
+        answerSec: t.answerSec, transcript: t.transcriptEdited ?? t.transcript, completedAt: t.completedAt,
+        answerUrl: t.answerAudioPath ? await d.storage.signedReadUrl(t.answerAudioPath, 600) : null,
+      }))),
+    }))));
+  }],
+  ["GET", /^\/parents\/(\d+)\/memory$/, async (m, _b, d) => {
+    const [row] = await d.db.select().from(memory).where(eq(memory.parentId, Number(m[1])));
+    return row ? ok(row.state) : bad("not_found", 404);
+  }],
+  ["GET", /^\/credits$/, async (_m, _b, d) => {
+    const mode = await aiMode(d.db, d.baze);
+    const snap = mode.snapshot ?? (await creditSnapshot(d.db, d.baze));
+    const [u] = await d.db.select({
+      credits: sql<number>`coalesce(sum(${aiUsage.credits}), 0)::float`, costUsd: sql<number>`coalesce(sum(${aiUsage.costUsd}), 0)::float`,
+    }).from(aiUsage).where(gte(aiUsage.createdAt, monthStart()));
+    const [t] = await d.db.select({ n: sql<number>`count(*)::int` }).from(turns)
+      .where(and(isNotNull(turns.answerAudioPath), gte(turns.completedAt, monthStart())));
+    return ok({
+      keys: snap.keys, snapshotAt: snap.at, paused: mode.paused, reason: mode.reason,
+      monthUsage: { credits: u.credits, costUsd: u.costUsd, turns: t.n },
+      avgCreditsPerTurn: t.n ? Math.round(u.credits / t.n) : 0,
+    });
+  }],
+  ["PUT", /^\/ai-pause$/, async (_m, body, d) => {
+    await setSetting(d.db, "ai_paused_manual", (body as { paused?: unknown })?.paused === true);
+    if ((body as { paused?: unknown })?.paused !== true) await creditSnapshot(d.db, d.baze, new Date(), true);
+    return ok({ ok: true });
+  }],
+  ["POST", /^\/parents\/(\d+)\/transcribe-deferred$/, async (m, _b, d) => {
+    const parentId = Number(m[1]);
+    if ((await aiMode(d.db, d.baze)).paused) return bad("ai_paused", 409);
+    const waiting = await d.db.select().from(turns)
+      .where(and(eq(turns.parentId, parentId), eq(turns.stt, "deferred"), isNotNull(turns.answerAudioPath))).orderBy(asc(turns.id));
+    let done = 0;
+    for (const t of waiting) {
+      try {
+        const conv = await (d.convert ?? toSttFormat)(await d.storage.get(t.answerAudioPath!), t.answerMime ?? "audio/webm");
+        const r = await d.baze.transcribe(conv.buf, conv.filename, conv.mime);
+        await recordUsage(d.db, r.usage, { parentId, sessionId: t.sessionId });
+        const sec = t.answerSec ?? (await (d.seconds ?? audioSeconds)(conv.buf, conv.mime).catch(() => null));
+        await d.db.update(turns).set({ transcript: r.text, stt: r.text.trim() ? "done" : "empty", status: "정리 완료", answerSec: sec }).where(eq(turns.id, t.id));
+        done++;
+      } catch (e) {
+        console.error("deferred stt failed", e instanceof Error ? e.message : e);
+        if (e instanceof BazeError && e.code === "no_credit") break;
+      }
+    }
+    return ok({ done, left: waiting.length - done });
+  }],
 ];
 
 export function isAdmin(email: string | null): boolean {

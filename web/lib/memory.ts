@@ -4,7 +4,8 @@ import type { Db } from "./db/types";
 import { memory } from "./db/schema";
 import { PERIODS } from "./seeds";
 
-export const FUNNEL = ["열기", "장면", "감각", "인물·대사", "감정", "의미"] as const;
+import { FUNNEL } from "./funnel";
+export { FUNNEL };
 
 const episodeSchema = z.object({
   id: z.string(),
