@@ -96,3 +96,17 @@ describe("balances", () => {
     expect(await baze.balances()).toEqual([{ name: "key1", remaining: 4800 }, { name: "key2", remaining: 5000 }]);
   });
 });
+
+describe("error detail", () => {
+  it("carries BAZE's own error text (not the key) for failed HTTP calls and failed jobs", async () => {
+    const f400 = (async () => new Response(JSON.stringify({ error: { message: "Audio duration could not be read" } }), { status: 400 })) as unknown as typeof fetch;
+    const e1 = await createBaze({ pool: pool2(), fetch: f400, sleep: noSleep }).transcribe(Buffer.from("a"), "a.m4a", "audio/mp4").catch((e) => e);
+    expect(e1.detail).toContain("Audio duration could not be read");
+    expect(e1.status).toBe(400);
+    expect(JSON.stringify(e1) + e1.message).not.toContain("SECRET");
+    const fJob = (async (_u: string, init?: RequestInit) =>
+      init?.method === "POST" ? Response.json({ operation_id: "op1" }) : Response.json({ status: "failed", error: "Audio file could not be decoded" })) as typeof fetch;
+    const e2 = await createBaze({ pool: pool2(), fetch: fJob, sleep: noSleep }).transcribe(Buffer.from("a"), "a.m4a", "audio/mp4").catch((e) => e);
+    expect(e2.detail).toBe("Audio file could not be decoded");
+  });
+});

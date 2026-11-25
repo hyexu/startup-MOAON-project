@@ -6,6 +6,8 @@ import { KeyPool, type NamedKey } from "./keys";
 export type BazeErrorCode = "no_credit" | "rate_limited" | "bad_request" | "server" | "no_keys";
 
 export class BazeError extends Error {
+  /** BAZE's own error text (never contains key values), for the operator screen. */
+  detail = "";
   constructor(public code: BazeErrorCode, public status: number, message: string) {
     super(message);
     this.name = "BazeError";
@@ -71,7 +73,14 @@ export function createBaze(deps: BazeDeps) {
     const headers = new Headers(init.headers);
     headers.set("authorization", `Bearer ${k.key}`);
     const res = await f(`${CONFIG.bazeBase}${path}`, { ...init, headers });
-    if (!res.ok) throw new BazeError(codeFor(res.status), res.status, `BAZE ${path} 실패 (${k.name}, ${res.status})`);
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      let detail = body;
+      try { const j = JSON.parse(body); detail = j?.error?.message ?? j?.error ?? j?.detail ?? j?.message ?? body; } catch { /* plain text */ }
+      const err = new BazeError(codeFor(res.status), res.status, `BAZE ${path} 실패 (${k.name}, ${res.status})`);
+      err.detail = String(typeof detail === "string" ? detail : JSON.stringify(detail)).replaceAll(k.key, "***").slice(0, 300);
+      throw err;
+    }
     return res;
   }
 
@@ -123,7 +132,11 @@ export function createBaze(deps: BazeDeps) {
               },
             };
           }
-          if (r.status === "failed") throw new BazeError("server", 502, "음성을 글로 옮기지 못했습니다.");
+          if (r.status === "failed") {
+            const err = new BazeError("server", 502, "음성을 글로 옮기지 못했습니다.");
+            err.detail = String(r.error ?? "").slice(0, 300);
+            throw err;
+          }
           if (Date.now() > deadline) throw new BazeError("server", 504, "음성 변환이 너무 오래 걸립니다.");
           await sleep(1500);
         }

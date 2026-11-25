@@ -162,3 +162,15 @@ describe("sessions and memory", () => {
     expect(m.episodes).toEqual([]);
   });
 });
+
+describe("deferred transcription errors", () => {
+  it("reports why each recording failed", async () => {
+    const s = await withTurns();
+    const { BazeError } = await import("@/lib/baze/client");
+    s.deps.baze = { ...s.deps.baze, transcribe: async () => { throw Object.assign(new BazeError("bad_request", 400, "x"), { detail: "Audio duration could not be read" }); } } as never;
+    const r = (await s.call("POST", `/parents/${s.id}/transcribe-deferred`)).json as { done: number; left: number; errors: { turnId: number; status: number; detail: string }[] };
+    expect(r.done).toBe(0);
+    expect(r.errors).toHaveLength(2);
+    expect(r.errors[0]).toMatchObject({ status: 400, detail: "Audio duration could not be read" });
+  });
+});

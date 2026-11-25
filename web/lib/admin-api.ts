@@ -180,6 +180,7 @@ const routes: [string, RegExp, Handler][] = [
     const waiting = await d.db.select().from(turns)
       .where(and(eq(turns.parentId, parentId), eq(turns.stt, "deferred"), isNotNull(turns.answerAudioPath))).orderBy(asc(turns.id));
     let done = 0;
+    const errors: { turnId: number; status: number; detail: string }[] = [];
     for (const t of waiting) {
       try {
         const conv = await (d.convert ?? toSttFormat)(await d.storage.get(t.answerAudioPath!), t.answerMime ?? "audio/webm");
@@ -190,10 +191,11 @@ const routes: [string, RegExp, Handler][] = [
         done++;
       } catch (e) {
         logError("deferred stt failed", e);
+        errors.push({ turnId: t.id, status: e instanceof BazeError ? e.status : 0, detail: e instanceof BazeError ? e.detail || e.message : e instanceof Error ? e.message.slice(0, 200) : "error" });
         if (e instanceof BazeError && e.code === "no_credit") break;
       }
     }
-    return ok({ done, left: waiting.length - done });
+    return ok({ done, left: waiting.length - done, errors });
   }],
 ];
 

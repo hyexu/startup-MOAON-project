@@ -5,5 +5,6 @@ export function logError(label: string, e: unknown): void {
     console.error(label, (e as Error).name ?? "DatabaseError", cause?.code ?? "");
     return;
   }
-  console.error(label, e instanceof Error ? `${e.name}: ${e.message}` : String(e));
+  const detail = (e as { detail?: string })?.detail;
+  console.error(label, e instanceof Error ? `${e.name}: ${e.message}${detail ? ` — ${detail}` : ""}` : String(e));
 }
