@@ -77,6 +77,7 @@ export const turns = pgTable("turns", {
   status: text("status").notNull().default("녹취 도착"),
   stt: text("stt").notNull().default("none"),
   command: text("command"),
+  claimedAt: ts("claimed_at"),
   completedAt: ts("completed_at"),
   createdAt: createdAt(),
 }, (t) => [unique("turns_session_seq").on(t.sessionId, t.seq)]);
