@@ -1,0 +1,27 @@
+:root {
+  color-scheme: light;
+  --bg: #F5F5F7;
+  --card: #FFFFFF;
+  --ink: #1D1D1F;
+  --muted: #6E6E73;
+  --line: #D2D2D7;
+  --line-soft: #E8E8ED;
+  --action: #2E5A4C;
+  --action-hover: #24483C;
+  --sage: #9FB283;
+  --sage-soft: #EEF2E8;
+  --warn: #9A4A1F;
+  --warn-soft: #FBEFE6;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", "Malgun Gothic", "맑은 고딕", sans-serif;
+  --r-card: 18px;
+  --r-ctl: 12px;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--ink); font-family: var(--sans); line-height: 1.6; -webkit-text-size-adjust: 100%; }
+a { color: var(--action); }
+button { font: inherit; cursor: pointer; }
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 3px solid var(--sage); outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
