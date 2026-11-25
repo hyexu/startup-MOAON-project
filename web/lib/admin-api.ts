@@ -1,0 +1,152 @@
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import { z } from "zod";
+import { aiUsage, links, memory, parents, questionSeeds, turns } from "./db/schema";
+import { envList, CONFIG } from "./config";
+import { copyDefaultSeeds, PERIODS } from "./seeds";
+import { createLink, revokeLink } from "./tokens";
+import { blankMemory, saveMemory, type MemoryState } from "./memory";
+import { aiMode } from "./ai-mode";
+import { pcmToMp3 } from "./audio";
+import { recordUsage } from "./usage";
+import type { TurnDeps } from "./turn";
+
+export type AdminDeps = TurnDeps & { after: (fn: () => Promise<void>) => void };
+export type AdminRequest = { method: string; path: string; body: unknown; adminEmail: string | null; origin: string };
+type Out = { status: number; json: unknown };
+type Handler = (m: string[], body: unknown, d: AdminDeps, req: AdminRequest) => Promise<Out>;
+
+const ok = (json: unknown): Out => ({ status: 200, json });
+const bad = (error: string, status = 400): Out => ({ status, json: { error } });
+
+const parentInput = z.object({
+  honorific: z.string().trim().min(1).max(40),
+  realName: z.string().trim().max(40).optional().nullable(),
+  birthYear: z.coerce.number().int().min(1900).max(2030).optional().nullable(),
+  hometown: z.string().trim().max(80).optional().nullable(),
+  job: z.string().trim().max(80).optional().nullable(),
+  familyNote: z.string().trim().max(1000).optional().nullable(),
+  guardianContact: z.string().trim().max(80).optional().nullable(),
+  retainUntil: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+});
+
+const seedInput = z.array(z.object({
+  id: z.number().int().optional(),
+  period: z.enum(PERIODS),
+  text: z.string().trim().min(1).max(300),
+  source: z.enum(["기본", "가족"]),
+  position: z.number().int(),
+  enabled: z.boolean(),
+}).passthrough()).max(200);
+
+const monthStart = () => { const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)); };
+
+export function linkMessage(honorific: string, url: string): string {
+  return `${honorific}, 안녕하세요. 모아온입니다.\n살아오신 이야기를 여쭙고 싶어요.\n\n${url}\n\n링크를 누르고 말씀하시듯 답해 주시면 됩니다.`;
+}
+
+/** Pre-voice enabled seeds that have no audio yet (used when AI is paused and for faster replies). */
+export async function voiceSeeds(d: AdminDeps, parentId: number): Promise<void> {
+  if ((await aiMode(d.db, d.baze)).paused) return;
+  const seeds = await d.db.select().from(questionSeeds)
+    .where(and(eq(questionSeeds.parentId, parentId), eq(questionSeeds.enabled, true), isNull(questionSeeds.audioPath), isNull(questionSeeds.usedAt)));
+  for (const s of seeds) {
+    try {
+      const r = await d.baze.speak(s.text);
+      const path = `s/${parentId}/${s.id}.mp3`;
+      await d.storage.put(path, await (d.toMp3 ?? pcmToMp3)(r.pcm), "audio/mpeg");
+      await d.db.update(questionSeeds).set({ audioPath: path }).where(eq(questionSeeds.id, s.id));
+      await recordUsage(d.db, r.usage, { parentId });
+    } catch (e) {
+      console.error("seed voice failed", e instanceof Error ? e.message : e);
+    }
+  }
+}
+
+const routes: [string, RegExp, Handler][] = [
+  ["GET", /^\/parents$/, async (_m, _b, d) => {
+    const ps = await d.db.select().from(parents).orderBy(asc(parents.id));
+    const last = await d.db.select({ parentId: turns.parentId, at: sql<string>`max(${turns.completedAt})` }).from(turns)
+      .where(isNotNull(turns.answerAudioPath)).groupBy(turns.parentId);
+    const credits = await d.db.select({ parentId: aiUsage.parentId, credits: sql<number>`coalesce(sum(${aiUsage.credits}), 0)::float` })
+      .from(aiUsage).where(gte(aiUsage.createdAt, monthStart())).groupBy(aiUsage.parentId);
+    const mems = await d.db.select({ parentId: memory.parentId, state: memory.state }).from(memory);
+    return ok(ps.map((p) => ({
+      id: p.id, honorific: p.honorific, status: p.status, retainUntil: p.retainUntil,
+      lastAnswerAt: last.find((l) => l.parentId === p.id)?.at ?? null,
+      periods: (mems.find((m) => m.parentId === p.id)?.state as MemoryState | undefined)?.periods ?? null,
+      monthCredits: credits.find((c) => c.parentId === p.id)?.credits ?? 0,
+    })));
+  }],
+  ["POST", /^\/parents$/, async (_m, body, d) => {
+    const v = parentInput.safeParse(body);
+    if (!v.success) return bad("invalid");
+    const retainUntil = v.data.retainUntil ?? new Date(Date.now() + CONFIG.retentionDays * 86400e3).toISOString().slice(0, 10);
+    const [p] = await d.db.insert(parents).values({ ...v.data, retainUntil }).returning();
+    await copyDefaultSeeds(d.db, p.id);
+    await saveMemory(d.db, p.id, blankMemory(p.honorific));
+    d.after(() => voiceSeeds(d, p.id));
+    return ok({ id: p.id });
+  }],
+  ["GET", /^\/parents\/(\d+)$/, async (m, _b, d) => {
+    const [p] = await d.db.select().from(parents).where(eq(parents.id, Number(m[1])));
+    return p ? ok(p) : bad("not_found", 404);
+  }],
+  ["PUT", /^\/parents\/(\d+)$/, async (m, body, d) => {
+    const v = parentInput.safeParse(body);
+    if (!v.success) return bad("invalid");
+    const r = await d.db.update(parents).set(v.data).where(eq(parents.id, Number(m[1]))).returning({ id: parents.id });
+    return r.length ? ok({ ok: true }) : bad("not_found", 404);
+  }],
+  ["GET", /^\/parents\/(\d+)\/seeds$/, async (m, _b, d) =>
+    ok(await d.db.select().from(questionSeeds).where(eq(questionSeeds.parentId, Number(m[1]))).orderBy(asc(questionSeeds.position)))],
+  ["PUT", /^\/parents\/(\d+)\/seeds$/, async (m, body, d) => {
+    const parentId = Number(m[1]);
+    const v = seedInput.safeParse(body);
+    if (!v.success) return bad("invalid");
+    const existing = await d.db.select().from(questionSeeds).where(eq(questionSeeds.parentId, parentId));
+    const byId = new Map(existing.map((s) => [s.id, s]));
+    for (const s of v.data) {
+      const prev = s.id ? byId.get(s.id) : undefined;
+      if (s.id && !prev) return bad("unknown_seed");
+      if (prev?.usedAt && prev.text !== s.text) return bad("used_seed_text");
+    }
+    const keep = new Set(v.data.filter((s) => s.id).map((s) => s.id!));
+    const removable = existing.filter((s) => !keep.has(s.id) && !s.usedAt).map((s) => s.id);
+    if (existing.some((s) => !keep.has(s.id) && s.usedAt)) return bad("used_seed_removed");
+    if (removable.length) await d.db.delete(questionSeeds).where(inArray(questionSeeds.id, removable));
+    for (const s of v.data) {
+      const row = { period: s.period, text: s.text, source: s.source, position: s.position, enabled: s.enabled };
+      if (s.id) {
+        const changed = byId.get(s.id)!.text !== s.text;
+        await d.db.update(questionSeeds).set(changed ? { ...row, audioPath: null } : row).where(eq(questionSeeds.id, s.id));
+      } else await d.db.insert(questionSeeds).values({ ...row, parentId });
+    }
+    d.after(() => voiceSeeds(d, parentId));
+    return ok({ ok: true });
+  }],
+  ["GET", /^\/parents\/(\d+)\/links$/, async (m, _b, d) =>
+    ok(await d.db.select({ id: links.id, createdAt: links.createdAt, expiresAt: links.expiresAt, revokedAt: links.revokedAt, lastUsedAt: links.lastUsedAt })
+      .from(links).where(eq(links.parentId, Number(m[1]))).orderBy(desc(links.id)))],
+  ["POST", /^\/parents\/(\d+)\/links$/, async (m, _b, d, req) => {
+    const [p] = await d.db.select().from(parents).where(eq(parents.id, Number(m[1])));
+    if (!p) return bad("not_found", 404);
+    const l = await createLink(d.db, p.id, req.origin);
+    return ok({ url: l.url, expiresAt: l.expiresAt, message: linkMessage(p.honorific, l.url) });
+  }],
+  ["POST", /^\/links\/(\d+)\/revoke$/, async (m, _b, d) => { await revokeLink(d.db, Number(m[1])); return ok({ ok: true }); }],
+];
+
+export function isAdmin(email: string | null): boolean {
+  return !!email && envList("ADMIN_EMAILS").map((e) => e.toLowerCase()).includes(email.toLowerCase());
+}
+
+export async function handleAdmin(req: AdminRequest, d: AdminDeps): Promise<Out> {
+  if (!isAdmin(req.adminEmail)) return bad("unauthorized", 401);
+  for (const [method, re, fn] of routes) {
+    const m = req.path.match(re);
+    if (m && method === req.method) return fn(m, req.body, d, req);
+  }
+  return bad("not_found", 404);
+}
+
+export { routes as adminRoutes };
