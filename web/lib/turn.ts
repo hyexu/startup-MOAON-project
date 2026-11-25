@@ -237,6 +237,7 @@ export async function completeTurn(d: TurnDeps, a: CompleteArgs): Promise<TurnOu
 /** Update the episode cards from the latest turns. Never throws. */
 export async function runRecorder(d: TurnDeps, parentId: number): Promise<void> {
   try {
+    if ((await aiMode(d.db, d.baze, nowOf(d))).paused) return;
     const [p] = await d.db.select().from(parents).where(eq(parents.id, parentId));
     const mem = await loadMemory(d.db, parentId);
     const state = mem.version ? mem.state : blankMemory(p.honorific);
