@@ -12,6 +12,8 @@ export type ParentEvent =
   | { type: "START" }
   | { type: "CONSENT_OK"; screen: "record" | "ai" }
   | { type: "DECLINE" }
+  | { type: "RECONSIDER" }
+  | { type: "CONSENT_NEEDED" }
   | { type: "MIC_OK" }
   | { type: "MIC_DENIED" }
   | { type: "INAPP_BLOCKED" }
@@ -36,6 +38,8 @@ export function reduce(s: ParentState, e: ParentEvent): ParentState {
     case "CONSENT_OK":
       return e.screen === "record" ? { ...s, screen: "consent-ai" } : { ...s, consentsDone: true, screen: "mic-help" };
     case "DECLINE": return { ...s, screen: "declined" };
+    case "RECONSIDER": return { ...s, screen: "consent-record" };
+    case "CONSENT_NEEDED": return { ...s, consentsDone: false, screen: "consent-record" };
     case "MIC_OK": return { ...s, micDenied: false, screen: "thinking" };
     case "MIC_DENIED": return { ...s, micDenied: true, screen: "mic-help" };
     case "INAPP_BLOCKED": return { ...s, screen: "inapp-help" };

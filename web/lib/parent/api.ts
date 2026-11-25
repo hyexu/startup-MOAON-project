@@ -21,13 +21,13 @@ export function realApi(token: string): ParentApi {
     async upload(turnId, blob, mime) {
       const u = await post<{ path: string; token: string }>("upload-url", { turnId, mime });
       for (let attempt = 0; attempt < 3; attempt++) {
-        const { error } = await supa().storage.from("audio").uploadToSignedUrl(u.path, u.token, blob, { contentType: mime.split(";")[0] });
+        const { error } = await supa().storage.from("audio").uploadToSignedUrl(u.path, u.token, blob, { contentType: mime.split(";")[0], upsert: true });
         if (!error) return u.path;
         await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
       }
       throw new ApiError(0, "upload_failed");
     },
-    complete: (turnId, path, mime, command) => post<ClientTurn>("complete", { turnId, path, mime, command }),
+    complete: (turnId, path, mime, command, partial) => post<ClientTurn>("complete", { turnId, path, mime, command, partial: !!partial }),
     async end(sessionId) { await post("end", { sessionId }); },
   };
 }

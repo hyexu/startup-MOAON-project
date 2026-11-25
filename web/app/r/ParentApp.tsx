@@ -8,6 +8,8 @@ import { realApi } from "@/lib/parent/api";
 import { detectInApp, isIOS } from "@/lib/parent/browser";
 import { ensureMic, startRecording, type Recording } from "@/lib/parent/recorder";
 import { clear, loadPending } from "@/lib/parent/backup";
+import { eventForError, pickPending } from "@/lib/parent/recovery";
+import { singleFlight } from "@/lib/parent/guard";
 import { playQuestion, setSound, soundOn, stopSpeaking, unlockAudio } from "@/lib/parent/speak";
 
 const COPY = {
@@ -15,6 +17,8 @@ const COPY = {
   agree: "동의합니다",
   readAloud: "읽어 주세요",
   decline: "동의하지 않을래요",
+  reconsider: "다시 생각해 볼게요",
+  sendFailed: "보내지 못했어요. 잠시 뒤 다시 눌러 주세요.",
   declined: "동의하지 않으셔도 됩니다. 그러면 녹음은 하지 않고, 전화로 여쭤보는 방법을 안내해 드려요.",
   micHelp: "다음 화면에서 '허용'을 눌러 주세요. 말씀을 녹음하려면 마이크가 필요해요.",
   micDenied: "마이크가 꺼져 있어요. 주소창 옆 자물쇠 모양을 누르고 마이크를 '허용'으로 바꾼 뒤 다시 눌러 주세요.",
@@ -80,7 +84,9 @@ export default function ParentApp() {
   const inApp = useRef(boot.inApp);
   const rec = useRef<Recording | null>(null);
   const [recState, setRecState] = useState<Recording | null>(null);
-  const pending = useRef<{ turnId: number; blob: Blob | null; mime: string | null; command: string | null } | null>(null);
+  const pending = useRef<{ turnId: number; blob: Blob | null; mime: string | null; command: string | null; partial?: boolean } | null>(null);
+  // One action at a time: a double tap on any button is ignored while the first is still running.
+  const [flight] = useState(() => singleFlight(async (fn: () => Promise<void>) => { await fn(); }));
   const hiddenAt = useRef<number | null>(null);
 
   useEffect(() => {
@@ -99,29 +105,30 @@ export default function ParentApp() {
     if (!p || !api.current) return;
     try {
       const path = p.blob && p.mime ? await api.current.upload(p.turnId, p.blob, p.mime) : null;
-      const next = await api.current.complete(p.turnId, path, p.blob ? p.mime : null, p.command);
+      const next = await api.current.complete(p.turnId, path, p.blob ? p.mime : null, p.command, p.partial);
       await clear(p.turnId);
       pending.current = null;
       dispatch({ type: "TURN", turn: next });
-    } catch {
-      dispatch({ type: "UPLOAD_FAIL" });
+    } catch (e) {
+      dispatch(eventForError(e));
     }
   }, []);
 
   const begin = useCallback(async () => {
     try {
-      const left = (await loadPending())[0];
       const first = await api.current!.start();
-      if (left && left.turnId === first.turnId) {
-        dispatch({ type: "TURN", turn: first });
-        pending.current = { turnId: left.turnId, blob: left.blob, mime: left.mime, command: null };
+      const { match, stale } = pickPending(await loadPending(), first.turnId);
+      await Promise.all(stale.map(clear));
+      dispatch({ type: "TURN", turn: first });
+      if (match) {
+        // An answer was cut off last time (tab closed, upload failed): send it, then continue at the same question.
+        pending.current = { turnId: match.turnId, blob: match.blob, mime: match.mime, command: null, partial: true };
         dispatch({ type: "REC_STOP" });
         await send();
-        return;
       }
-      dispatch({ type: "TURN", turn: first });
-    } catch {
-      dispatch({ type: "FAIL" });
+    } catch (e) {
+      const ev = eventForError(e);
+      dispatch(ev.type === "UPLOAD_FAIL" ? { type: "FAIL" } : ev);
     }
   }, [send]);
 
@@ -136,14 +143,14 @@ export default function ParentApp() {
     }
   }, [begin]);
 
-  const finish = useCallback(async () => {
+  const finish = useCallback(async (partial = false) => {
     const r = rec.current;
     if (!r || !s.turn) return;
     rec.current = null;
     setRecState(null);
     dispatch({ type: "REC_STOP" });
     const blob = await r.stop();
-    pending.current = { turnId: s.turn.turnId, blob, mime: r.mime, command: null };
+    pending.current = { turnId: s.turn.turnId, blob, mime: r.mime, command: null, partial };
     await send();
   }, [s.turn, send]);
 
@@ -179,7 +186,7 @@ export default function ParentApp() {
       else if (hiddenAt.current && Date.now() - hiddenAt.current > 3000) {
         hiddenAt.current = null;
         setNotice(COPY.iosResume);
-        void finishRef.current();
+        void finishRef.current(true);
       }
     };
     document.addEventListener("visibilitychange", onVis);
@@ -203,7 +210,7 @@ export default function ParentApp() {
           <>
             <h1 className="title">{info.honorific}, 안녕하세요. 모아온입니다.</h1>
             <p className="lead">살아오신 이야기를 한 가지씩 여쭤볼게요. 편하게 말씀하시듯 답해 주시면 됩니다.</p>
-            <button className="primary" onClick={() => { unlockAudio(); dispatch({ type: "START" }); }}>{COPY.start}</button>
+            <button className="primary" onClick={() => { unlockAudio(); setNotice(null); dispatch({ type: "START" }); }}>{COPY.start}</button>
           </>
         )}
 
@@ -211,11 +218,18 @@ export default function ParentApp() {
           <>
             <h1 className="title">{consent.title}</h1>
             <ul className="consent">{consentLines.map((l) => <li key={l}>{l}</li>)}</ul>
-            <button className="primary" onClick={async () => {
+            {notice && <p className="notice">{notice}</p>}
+            <button className="primary" onClick={() => void flight(async () => {
               const id = consent.id;
-              await api.current!.consent(id);
-              dispatch({ type: "CONSENT_OK", screen: id });
-            }}>{COPY.agree}</button>
+              try {
+                await api.current!.consent(id);
+                setNotice(null);
+                dispatch({ type: "CONSENT_OK", screen: id });
+              } catch (e) {
+                const ev = eventForError(e);
+                if (ev.type === "INFO_FAIL") dispatch(ev); else setNotice(COPY.sendFailed);
+              }
+            })}>{COPY.agree}</button>
             <div className="minor">
               <button className="link" onClick={() => void playQuestion(null, [consent.title, ...consentLines].join(" "))}>{COPY.readAloud}</button>
               <button className="link" onClick={() => dispatch({ type: "DECLINE" })}>{COPY.decline}</button>
@@ -224,19 +238,24 @@ export default function ParentApp() {
           </>
         )}
 
-        {s.screen === "declined" && <p className="lead">{COPY.declined}</p>}
+        {s.screen === "declined" && (
+          <>
+            <p className="lead">{COPY.declined}</p>
+            <div className="minor"><button className="link" onClick={() => dispatch({ type: "RECONSIDER" })}>{COPY.reconsider}</button></div>
+          </>
+        )}
 
         {s.screen === "mic-help" && (
           <>
             <p className="lead">{s.micDenied ? COPY.micDenied : COPY.micHelp}</p>
-            <button className="primary" onClick={() => void micOn(false)}>{COPY.micOn}</button>
+            <button className="primary" onClick={() => void flight(() => micOn(false))}>{COPY.micOn}</button>
           </>
         )}
 
         {s.screen === "inapp-help" && (
           <>
             <p className="lead">{boot.inApp === "kakao" ? COPY.inapp : COPY.inappOther}</p>
-            <div className="minor"><button className="link" onClick={() => void micOn(true)}>{COPY.inappContinue}</button></div>
+            <div className="minor"><button className="link" onClick={() => void flight(() => micOn(true))}>{COPY.inappContinue}</button></div>
           </>
         )}
 
@@ -244,14 +263,14 @@ export default function ParentApp() {
           <>
             {notice && <p className="notice">{notice}</p>}
             <h1 className="question">{s.turn.question}</h1>
-            <button className="primary" onClick={() => void speakNow()}>{COPY.speak}</button>
+            <button className="primary" onClick={() => void flight(speakNow)}>{COPY.speak}</button>
             <div className="minor">
-              <button className="link" onClick={() => void command("기억이 안 나요")}>{COPY.forgot}</button>
-              <button className="link" onClick={() => void command("넘어갈게요")}>{COPY.skip}</button>
+              <button className="link" onClick={() => void flight(() => command("기억이 안 나요"))}>{COPY.forgot}</button>
+              <button className="link" onClick={() => void flight(() => command("넘어갈게요"))}>{COPY.skip}</button>
               <button className="link" onClick={() => void playQuestion(s.turn!.audioUrl, s.turn!.question)}>{COPY.replay}</button>
             </div>
             <div className="bottom">
-              <button className="link" onClick={() => void command("오늘은 여기까지")}>{COPY.end}</button>
+              <button className="link" onClick={() => void flight(() => command("오늘은 여기까지"))}>{COPY.end}</button>
               <button className="link" onClick={() => { const on = !sound; setSound(on); setSoundState(on); if (!on) stopSpeaking(); }}>
                 {sound ? COPY.soundOff : COPY.soundOnLabel}
               </button>
@@ -264,7 +283,7 @@ export default function ParentApp() {
             <p className="recording-label">듣고 있어요. 편하게 말씀해 주세요.</p>
             <Clock startedAt={recState.startedAt} />
             <Level rec={recState} />
-            <button className="primary stop" onClick={() => void finish()}>{COPY.done}</button>
+            <button className="primary stop" onClick={() => void flight(() => finish())}>{COPY.done}</button>
           </>
         )}
 
@@ -273,7 +292,7 @@ export default function ParentApp() {
         {s.screen === "error" && (
           <>
             <p className="lead">{COPY.error}</p>
-            <button className="primary" onClick={() => { dispatch({ type: "RETRY" }); void (pending.current ? send() : begin()); }}>{COPY.retry}</button>
+            <button className="primary" onClick={() => void flight(async () => { dispatch({ type: "RETRY" }); await (pending.current ? send() : begin()); })}>{COPY.retry}</button>
           </>
         )}
 

@@ -6,7 +6,7 @@ import { copyDefaultSeeds, DEFAULT_SEEDS } from "@/lib/seeds";
 import { BazeError } from "@/lib/baze/client";
 import { memoryStorage } from "@/lib/storage";
 import { setSetting } from "@/lib/ai-mode";
-import { completeTurn, EMPTY_ANSWER_PREFIX, NotFound, startSession, type TurnDeps } from "@/lib/turn";
+import { completeTurn, CONTINUE_PREFIX, EMPTY_ANSWER_PREFIX, NotFound, startSession, type TurnDeps } from "@/lib/turn";
 import type { UsageRow } from "@/lib/usage";
 
 const usage = (kind: UsageRow["kind"]): UsageRow => ({
@@ -161,5 +161,43 @@ describe("startSession", () => {
     const b = await startSession(s.deps, s.p.id);
     expect(b.sessionId).toBe(a.sessionId);
     expect(b.turn.turnId).toBe(a.turn.turnId);
+  });
+});
+
+describe("review fixes: turn pipeline", () => {
+  it("returns the same next question to a duplicate request even when the interviewer is slow", async () => {
+    const s = await setup();
+    const first = await startSession(s.deps, s.p.id);
+    const slow = s.deps.baze.message;
+    s.deps.baze = { ...s.deps.baze, message: async (a: never) => { await new Promise((r) => setTimeout(r, 400)); return slow(a); } } as never;
+    s.deps.sleep = (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 50)));
+    const args = { parentId: s.p.id, turnId: first.turn.turnId, audioPath: null, mime: null, command: "넘어갈게요" };
+    const [a, b] = await Promise.all([completeTurn(s.deps, args), completeTurn(s.deps, args)]);
+    expect(a.turnId).toBe(b.turnId);
+    expect(await s.db.select().from(turns)).toHaveLength(2);
+  });
+
+  it("keeps going when the recording cannot be converted", async () => {
+    const s = await setup();
+    s.deps.convert = async () => { throw new Error("ffmpeg failed"); };
+    const first = await startSession(s.deps, s.p.id);
+    const next = await answer(s, first.turn.turnId);
+    expect(next.question).toBeTruthy();
+    const [done] = await s.db.select().from(turns).where(eq(turns.id, first.turn.turnId));
+    expect(done.stt).toBe("failed");
+    expect(done.answerAudioPath).not.toBeNull();
+  });
+
+  it("asks the same question again after an interrupted answer", async () => {
+    const s = await setup();
+    const first = await startSession(s.deps, s.p.id);
+    const path = `a/${s.p.id}/${first.turn.turnId}.webm`;
+    await s.storage.put(path, Buffer.from("audio"), "audio/webm");
+    const next = await completeTurn(s.deps, { parentId: s.p.id, turnId: first.turn.turnId, audioPath: path, mime: "audio/webm", command: null, partial: true });
+    expect(next.source).toBe("system");
+    expect(next.question.startsWith(CONTINUE_PREFIX)).toBe(true);
+    expect(next.question).toContain(first.turn.question);
+    const [done] = await s.db.select().from(turns).where(eq(turns.id, first.turn.turnId));
+    expect(done.transcript).toBe("감나무가 있었어요");
   });
 });

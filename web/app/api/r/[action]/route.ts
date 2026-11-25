@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { logError } from "@/lib/log";
 import { handleParent } from "@/lib/parent-api";
 import { serverDeps } from "@/lib/server/deps";
 
@@ -11,7 +12,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ action: string
     const out = await handleParent(action, body && typeof body === "object" ? body : {}, serverDeps());
     return NextResponse.json(out.json, { status: out.status, headers: { "cache-control": "no-store" } });
   } catch (e) {
-    console.error("parent api failed", action, e instanceof Error ? e.message : e);
+    logError(`parent api failed ${action}`, e);
     return NextResponse.json({ error: "server" }, { status: 500 });
   }
 }

@@ -9,6 +9,6 @@ export type ParentApi = {
   consent(screen: "record" | "ai"): Promise<{ consentsDone: boolean }>;
   start(): Promise<ClientTurn & { sessionId: number }>;
   upload(turnId: number, blob: Blob, mime: string): Promise<string>;
-  complete(turnId: number, path: string | null, mime: string | null, command: string | null): Promise<ClientTurn>;
+  complete(turnId: number, path: string | null, mime: string | null, command: string | null, partial?: boolean): Promise<ClientTurn>;
   end(sessionId: number): Promise<void>;
 };

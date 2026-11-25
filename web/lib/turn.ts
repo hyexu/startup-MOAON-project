@@ -10,11 +10,14 @@ import { recordUsage, type UsageRow } from "./usage";
 import { blankMemory, loadMemory, memoryJsonSchema, mergeMemory, saveMemory } from "./memory";
 import { buildInterviewerRequest, type PromptTurn } from "./prompts/interviewer";
 import { buildRecorderRequest, RECORDER_SYSTEM } from "./prompts/recorder";
+import { logError } from "./log";
 
 export const EMPTY_ANSWER_PREFIX = "소리가 잘 안 들렸어요. 한 번만 더 말씀해 주시겠어요?";
+export const CONTINUE_PREFIX = "말씀이 중간에 끊겼어요. 이어서 말씀해 주세요.";
 export const CLOSING_TEXT = "오늘 들려주신 이야기 정말 고맙습니다. 다음에 또 여쭤볼게요.";
 export const END_COMMAND = "오늘은 여기까지";
-const CLAIM_STALE_SEC = 150;
+const CLAIM_STALE_SEC = 110;
+const WAIT_MAX_SEC = 100;
 const RESUME_HOURS = 24;
 
 export class NotFound extends Error {
@@ -46,9 +49,10 @@ function kstDayStart(now: Date): Date {
   return new Date(Date.UTC(kst.getUTCFullYear(), kst.getUTCMonth(), kst.getUTCDate()) - 9 * 3600e3);
 }
 
-async function promptTurns(db: Db, parentId: number): Promise<PromptTurn[]> {
+/** Answered turns, oldest first. `current` is the turn being completed right now (its completedAt is not set yet). */
+async function promptTurns(db: Db, parentId: number, current?: number): Promise<PromptTurn[]> {
   const rows = await db.select().from(turns)
-    .where(and(eq(turns.parentId, parentId), isNotNull(turns.completedAt)))
+    .where(and(eq(turns.parentId, parentId), current ? or(isNotNull(turns.completedAt), eq(turns.id, current)) : isNotNull(turns.completedAt)))
     .orderBy(desc(turns.id)).limit(CONFIG.recentTurns + 1);
   return rows.reverse().map((t) => ({ question: t.question, answer: t.transcriptEdited ?? t.transcript, command: t.command }));
 }
@@ -70,7 +74,7 @@ async function seedNext(d: TurnDeps, parentId: number): Promise<Next> {
 }
 
 /** Ask the interviewer. Returns null on any failure so the caller can fall back to a seed. */
-async function interviewerNext(d: TurnDeps, parentId: number, sessionId: number, isNewSession: boolean): Promise<string | null> {
+async function interviewerNext(d: TurnDeps, parentId: number, sessionId: number, isNewSession: boolean, current?: number): Promise<string | null> {
   const [p] = await d.db.select().from(parents).where(eq(parents.id, parentId));
   const mem = await loadMemory(d.db, parentId);
   const [prev] = await d.db.select({ summary: sessions.summary }).from(sessions)
@@ -78,7 +82,7 @@ async function interviewerNext(d: TurnDeps, parentId: number, sessionId: number,
   const seeds = (await unusedSeeds(d.db, parentId)).map((s) => ({ period: s.period, text: s.text }));
   const req = buildInterviewerRequest({
     honorific: p.honorific, state: mem.version ? mem.state : blankMemory(p.honorific), seeds,
-    lastSessionSummary: prev?.summary ?? null, isNewSession, turns: await promptTurns(d.db, parentId),
+    lastSessionSummary: prev?.summary ?? null, isNewSession, turns: await promptTurns(d.db, parentId, current),
   });
   try {
     const r = await d.baze.message({
@@ -88,7 +92,7 @@ async function interviewerNext(d: TurnDeps, parentId: number, sessionId: number,
     return r.text.trim() || null;
   } catch (e) {
     if (e instanceof BazeError && e.code === "no_credit") await invalidateCredits(d.db);
-    console.error("interviewer failed", e instanceof Error ? e.message : e);
+    logError("interviewer failed", e);
     return null;
   }
 }
@@ -101,7 +105,7 @@ async function speakTo(d: TurnDeps, text: string, path: string, parentId: number
     return path;
   } catch (e) {
     if (e instanceof BazeError && e.code === "no_credit") await invalidateCredits(d.db);
-    console.error("tts failed", e instanceof Error ? e.message : e);
+    logError("tts failed", e);
     return null;
   }
 }
@@ -113,17 +117,24 @@ async function todayCount(d: TurnDeps, parentId: number): Promise<number> {
 }
 
 /** Insert the next turn (or the closing turn), voice it, and return it. */
-async function emit(d: TurnDeps, mode: AiMode, parentId: number, sessionId: number, next: Next): Promise<TurnOut> {
-  const [{ maxSeq }] = await d.db.select({ maxSeq: sql<number>`coalesce(max(${turns.seq}), 0)::int` }).from(turns).where(eq(turns.sessionId, sessionId));
-  const [row] = await d.db.insert(turns).values({
-    sessionId, parentId, seq: maxSeq + 1, question: next.text, questionSource: next.source,
-    completedAt: next.done ? nowOf(d) : null,
-  }).returning();
+async function emit(d: TurnDeps, mode: AiMode, parentId: number, sessionId: number, next: Next, completes?: number): Promise<TurnOut> {
+  // The follow-up row and the answered turn's completedAt are written together, so a waiting duplicate request
+  // never sees a completed turn without its follow-up.
+  const row = await d.db.transaction(async (tx) => {
+    const [{ maxSeq }] = await tx.select({ maxSeq: sql<number>`coalesce(max(${turns.seq}), 0)::int` }).from(turns).where(eq(turns.sessionId, sessionId));
+    const [r] = await tx.insert(turns).values({
+      sessionId, parentId, seq: maxSeq + 1, question: next.text, questionSource: next.source,
+      completedAt: next.done ? nowOf(d) : null,
+    }).returning();
+    if (completes) await tx.update(turns).set({ completedAt: nowOf(d) }).where(eq(turns.id, completes));
+    return r;
+  });
   let audioPath = next.audioPath;
   if (!audioPath && !mode.paused) audioPath = await speakTo(d, next.text, `q/${parentId}/${row.id}.mp3`, parentId, sessionId);
   if (audioPath) await d.db.update(turns).set({ questionAudioPath: audioPath }).where(eq(turns.id, row.id));
   if (next.done) await d.db.update(sessions).set({ endedAt: nowOf(d), endReason: "done", summary: next.text }).where(eq(sessions.id, sessionId));
-  return { turnId: row.id, seq: row.seq, question: next.text, audioUrl: audioPath ? await d.storage.signedReadUrl(audioPath, 3600) : null, source: next.source, done: next.done };
+  const audioUrl = audioPath ? await d.storage.signedReadUrl(audioPath, 3600).catch(() => null) : null;
+  return { turnId: row.id, seq: row.seq, question: next.text, audioUrl, source: next.source, done: next.done };
 }
 
 async function toOut(d: TurnDeps, t: TurnRow): Promise<TurnOut> {
@@ -131,7 +142,7 @@ async function toOut(d: TurnDeps, t: TurnRow): Promise<TurnOut> {
   const [later] = await d.db.select({ id: turns.id }).from(turns).where(and(eq(turns.sessionId, t.sessionId), gt(turns.id, t.id))).limit(1);
   return {
     turnId: t.id, seq: t.seq, question: t.question,
-    audioUrl: t.questionAudioPath ? await d.storage.signedReadUrl(t.questionAudioPath, 3600) : null,
+    audioUrl: t.questionAudioPath ? await d.storage.signedReadUrl(t.questionAudioPath, 3600).catch(() => null) : null,
     source: t.questionSource as TurnOut["source"], done: !!s.endedAt && !later,
   };
 }
@@ -167,69 +178,78 @@ async function claim(d: TurnDeps, turnId: number): Promise<boolean> {
   return r.length === 1;
 }
 
-async function nextAfter(d: TurnDeps, t: TurnRow): Promise<TurnOut> {
+async function followUp(d: TurnDeps, t: TurnRow): Promise<TurnOut | null> {
   const [n] = await d.db.select().from(turns).where(and(eq(turns.sessionId, t.sessionId), gt(turns.id, t.id))).orderBy(asc(turns.id)).limit(1);
-  if (!n) throw new Error("completed turn has no follow-up");
-  return toOut(d, n);
+  return n ? toOut(d, n) : null;
 }
 
-async function waitForCompletion(d: TurnDeps, turnId: number): Promise<TurnRow> {
+/** A duplicate request waits for the first one's follow-up question instead of failing. */
+async function waitForFollowUp(d: TurnDeps, t: TurnRow): Promise<TurnOut> {
   const sleep = d.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
-  for (let i = 0; i < CLAIM_STALE_SEC * 4; i++) {
-    const [t] = await d.db.select().from(turns).where(eq(turns.id, turnId));
-    if (t.completedAt) return t;
+  for (let i = 0; i < WAIT_MAX_SEC * 4; i++) {
+    const n = await followUp(d, t);
+    if (n) return n;
     await sleep(250);
   }
   throw new Error("turn still processing");
 }
 
-export type CompleteArgs = { parentId: number; turnId: number; audioPath: string | null; mime: string | null; command: string | null };
+export type CompleteArgs = { parentId: number; turnId: number; audioPath: string | null; mime: string | null; command: string | null; partial?: boolean };
 
 /** Save the answer, transcribe it, and produce the next question. Safe to call twice for the same turn. */
 export async function completeTurn(d: TurnDeps, a: CompleteArgs): Promise<TurnOut> {
   const [t] = await d.db.select().from(turns).where(eq(turns.id, a.turnId));
   if (!t || t.parentId !== a.parentId) throw new NotFound();
-  if (t.completedAt) return nextAfter(d, t);
-  if (!(await claim(d, t.id))) return nextAfter(d, await waitForCompletion(d, t.id));
+  const existing = await followUp(d, t);
+  if (existing) return existing;
+  if (!(await claim(d, t.id))) return waitForFollowUp(d, t);
 
   try {
     const mode = await aiMode(d.db, d.baze, nowOf(d));
     let transcript: string | null = null, stt = "none", answerSec: number | null = null;
     if (a.audioPath && a.mime) {
-      const raw = await d.storage.get(a.audioPath);
-      const conv = await (d.convert ?? toSttFormat)(raw, a.mime);
-      answerSec = await (d.seconds ?? audioSeconds)(conv.buf, conv.mime).catch(() => null);
       stt = "deferred";
-      if (!mode.paused) {
-        try {
-          const r = await d.baze.transcribe(conv.buf, conv.filename, conv.mime);
-          await log(d, r.usage, a.parentId, t.sessionId);
-          transcript = r.text;
-          stt = r.text.trim() ? "done" : "empty";
-        } catch (e) {
-          if (e instanceof BazeError && e.code === "no_credit") await invalidateCredits(d.db);
-          console.error("stt failed", e instanceof Error ? e.message : e);
+      try {
+        const raw = await d.storage.get(a.audioPath);
+        const conv = await (d.convert ?? toSttFormat)(raw, a.mime);
+        answerSec = await (d.seconds ?? audioSeconds)(conv.buf, conv.mime).catch(() => null);
+        if (!mode.paused) {
+          try {
+            const r = await d.baze.transcribe(conv.buf, conv.filename, conv.mime);
+            await log(d, r.usage, a.parentId, t.sessionId);
+            transcript = r.text;
+            stt = r.text.trim() ? "done" : "empty";
+          } catch (e) {
+            if (e instanceof BazeError && e.code === "no_credit") await invalidateCredits(d.db);
+            logError("stt failed", e);
+          }
         }
+      } catch (e) {
+        // A recording we cannot read or convert must not trap the parent: keep it for the operator and move on.
+        stt = "failed";
+        logError("audio read/convert failed", e);
       }
     }
     await d.db.update(turns).set({
       answerAudioPath: a.audioPath, answerMime: a.mime, answerSec, transcript, stt, command: a.command,
-      completedAt: nowOf(d), status: stt === "done" ? "정리 완료" : "녹취 도착",
+      status: stt === "done" ? "정리 완료" : "녹취 도착",
     }).where(eq(turns.id, t.id));
 
     let next: Next | null = null;
     const ending = a.command === END_COMMAND;
-    if (stt === "empty" && !a.command) {
+    if (a.partial && !a.command) {
+      next = { text: `${CONTINUE_PREFIX} ${t.question}`, source: "system", audioPath: null, done: false };
+    } else if (stt === "empty" && !a.command) {
       next = { text: `${EMPTY_ANSWER_PREFIX} ${t.question}`, source: "system", audioPath: null, done: false };
-    } else if (!mode.paused && (ending || (await todayCount(d, a.parentId)) <= CONFIG.dailyTurnCap)) {
-      const text = await interviewerNext(d, a.parentId, t.sessionId, false);
+    } else if (!mode.paused && (ending || (await todayCount(d, a.parentId)) + 1 <= CONFIG.dailyTurnCap)) {
+      const text = await interviewerNext(d, a.parentId, t.sessionId, false, t.id);
       if (text) next = { text, source: "ai", audioPath: null, done: ending };
     }
     if (!next && ending) next = { text: CLOSING_TEXT, source: "system", audioPath: null, done: true };
     next ??= await seedNext(d, a.parentId);
-    return await emit(d, mode, a.parentId, t.sessionId, next);
+    return await emit(d, mode, a.parentId, t.sessionId, next, t.id);
   } catch (e) {
-    await d.db.update(turns).set({ claimedAt: null, completedAt: null }).where(eq(turns.id, t.id));
+    await d.db.update(turns).set({ claimedAt: null }).where(and(eq(turns.id, t.id), isNull(turns.completedAt)));
     throw e;
   }
 }
@@ -249,6 +269,6 @@ export async function runRecorder(d: TurnDeps, parentId: number): Promise<void> 
     await log(d, r.usage, parentId);
     if (r.json) await saveMemory(d.db, parentId, mergeMemory(state, r.json));
   } catch (e) {
-    console.error("recorder failed", e instanceof Error ? e.message : e);
+    logError("recorder failed", e);
   }
 }

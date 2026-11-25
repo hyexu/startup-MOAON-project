@@ -19,8 +19,21 @@ async function holdWake() {
   try { wake = await (navigator as unknown as { wakeLock?: { request(t: string): Promise<typeof wake> } }).wakeLock?.request("screen") ?? null; } catch { wake = null; }
 }
 
-/** Record one answer; chunks go to IndexedDB every 5 seconds; stops itself at the answer limit. */
+let active = false;
+
+/** Record one answer; chunks go to IndexedDB every 5 seconds; stops itself at the answer limit. Only one at a time. */
 export async function startRecording(turnId: number, onLimit: () => void): Promise<Recording> {
+  if (active) throw new Error("already recording");
+  active = true;
+  try {
+    return await begin(turnId, onLimit);
+  } catch (e) {
+    active = false;
+    throw e;
+  }
+}
+
+async function begin(turnId: number, onLimit: () => void): Promise<Recording> {
   await ensureMic();
   const mime = pickMime();
   const rec = new MediaRecorder(stream!, mime ? { mimeType: mime, audioBitsPerSecond: 64000 } : { audioBitsPerSecond: 64000 });
@@ -50,6 +63,7 @@ export async function startRecording(turnId: number, onLimit: () => void): Promi
       clearTimeout(limit);
       return new Promise<Blob>((resolve) => {
         rec.onstop = () => {
+          active = false;
           void ctx.close();
           void wake?.release().catch(() => {});
           resolve(new Blob(chunks, { type: actualMime }));

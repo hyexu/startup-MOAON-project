@@ -81,3 +81,17 @@ describe("handleParent", () => {
     expect((await handleParent("drop-tables", { token: s.a.token }, s.deps)).status).toBe(404);
   });
 });
+
+describe("review fixes: parent api", () => {
+  it("rejects a path that climbs out of the turn's own folder", async () => {
+    const s = await setup();
+    for (const x of [s.a, s.b]) {
+      await handleParent("consent", { token: x.token, screen: "record" }, s.deps);
+      await handleParent("consent", { token: x.token, screen: "ai" }, s.deps);
+    }
+    const t = (await handleParent("start", { token: s.a.token }, s.deps)).json as { turnId: number };
+    const sneaky = `a/${s.a.p.id}/${t.turnId}./../../${s.b.p.id}/1.webm`;
+    const r = await handleParent("complete", { token: s.a.token, turnId: t.turnId, path: sneaky, mime: "audio/webm", command: null }, s.deps);
+    expect(r.status).toBe(400);
+  });
+});

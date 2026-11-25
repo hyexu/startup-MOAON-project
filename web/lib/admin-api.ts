@@ -1,4 +1,5 @@
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import { logError } from "./log";
 import { z } from "zod";
 import { aiUsage, links, memory, parents, questionSeeds, turns } from "./db/schema";
 import { envList, CONFIG } from "./config";
@@ -60,7 +61,7 @@ export async function voiceSeeds(d: AdminDeps, parentId: number): Promise<void> 
       await d.db.update(questionSeeds).set({ audioPath: path }).where(eq(questionSeeds.id, s.id));
       await recordUsage(d.db, r.usage, { parentId });
     } catch (e) {
-      console.error("seed voice failed", e instanceof Error ? e.message : e);
+      logError("seed voice failed", e);
     }
   }
 }
@@ -188,7 +189,7 @@ const routes: [string, RegExp, Handler][] = [
         await d.db.update(turns).set({ transcript: r.text, stt: r.text.trim() ? "done" : "empty", status: "정리 완료", answerSec: sec }).where(eq(turns.id, t.id));
         done++;
       } catch (e) {
-        console.error("deferred stt failed", e instanceof Error ? e.message : e);
+        logError("deferred stt failed", e);
         if (e instanceof BazeError && e.code === "no_credit") break;
       }
     }

@@ -59,11 +59,11 @@ export async function handleParent(action: string, body: Body, d: ParentDeps): P
       const path = body.path == null ? null : String(body.path);
       const mime = body.mime == null ? null : String(body.mime);
       const command = body.command == null ? null : String(body.command);
-      if (path && (!path.startsWith(`a/${parentId}/${t.id}.`) || !mime || !MIMES.test(mime))) return err(400, "bad_path");
+      if (path && (!mime || !MIMES.test(mime) || path !== `a/${parentId}/${t.id}.${extFor(mime)}`)) return err(400, "bad_path");
       if (command && !COMMANDS.has(command)) return err(400, "bad_command");
       if (!path && !command) return err(400, "empty");
       try {
-        const out = await completeTurn(d, { parentId, turnId: t.id, audioPath: path, mime, command });
+        const out = await completeTurn(d, { parentId, turnId: t.id, audioPath: path, mime, command, partial: body.partial === true });
         if (path) d.after(() => runRecorder(d, parentId));
         return ok(out);
       } catch (e) {
