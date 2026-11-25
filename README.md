@@ -10,6 +10,10 @@ AI가 부모님과 대화하며 유년·학창·청년 시절의 이야기를 �
 ## 현재 단계
 - 시장조사 진행 중 (고려대 창업 수업)
 - 인터뷰 AI 시범: Claude 스킬로 프로토타입 작성 → [`skills/life-story-interviewer/SKILL.md`](skills/life-story-interviewer/SKILL.md)
+- 화면 시제품(spike): [`spike/memoir-interviewer.html`](spike/memoir-interviewer.html)
+  - 탭 3개: 인터뷰(대화) · 기록 카드 · 책(원고, 직접 수정 가능)
+  - 어르신용 큰 글씨, 음성 받아쓰기·읽어 주기, 원고 HTML/TXT 다운로드
+  - Claude 기능(`claude.use`)을 쓰므로 **claude.ai에서 artifact로 열어야 동작**합니다. GitHub에서 파일을 바로 열면 대화가 되지 않습니다.
 
 진행 상황은 [`PROGRESS.md`](PROGRESS.md)에 날짜별로 기록합니다.
 
@@ -18,6 +22,7 @@ AI가 부모님과 대화하며 유년·학창·청년 시절의 이야기를 �
 README.md                              서비스 소개, 현재 단계
 PROGRESS.md                            날짜별 진행 일지
 skills/life-story-interviewer/SKILL.md 인터뷰·기록·원고 작성 AI 지침
+spike/memoir-interviewer.html          인터뷰 화면 시제품 (claude.ai artifact)
 pilot/                                 시범 결과 요약 (가명 처리한 샘플만)
 ```
 
