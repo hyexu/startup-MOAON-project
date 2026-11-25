@@ -171,6 +171,6 @@ describe("deferred transcription errors", () => {
     const r = (await s.call("POST", `/parents/${s.id}/transcribe-deferred`)).json as { done: number; left: number; errors: { turnId: number; status: number; detail: string }[] };
     expect(r.done).toBe(0);
     expect(r.errors).toHaveLength(2);
-    expect(r.errors[0]).toMatchObject({ status: 400, detail: "Audio duration could not be read" });
+    expect(r.errors[0]).toMatchObject({ status: 400, detail: "Audio duration could not be read", storedBytes: 1, sentBytes: 1, mime: "audio/webm" });
   });
 });

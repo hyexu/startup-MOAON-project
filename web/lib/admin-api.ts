@@ -180,10 +180,14 @@ const routes: [string, RegExp, Handler][] = [
     const waiting = await d.db.select().from(turns)
       .where(and(eq(turns.parentId, parentId), eq(turns.stt, "deferred"), isNotNull(turns.answerAudioPath))).orderBy(asc(turns.id));
     let done = 0;
-    const errors: { turnId: number; status: number; detail: string }[] = [];
+    const errors: { turnId: number; status: number; detail: string; storedBytes: number | null; sentBytes: number | null; mime: string | null }[] = [];
     for (const t of waiting) {
+      let storedBytes: number | null = null, sentBytes: number | null = null;
       try {
-        const conv = await (d.convert ?? toSttFormat)(await d.storage.get(t.answerAudioPath!), t.answerMime ?? "audio/webm");
+        const raw = await d.storage.get(t.answerAudioPath!);
+        storedBytes = raw.length;
+        const conv = await (d.convert ?? toSttFormat)(raw, t.answerMime ?? "audio/webm");
+        sentBytes = conv.buf.length;
         const r = await d.baze.transcribe(conv.buf, conv.filename, conv.mime);
         await recordUsage(d.db, r.usage, { parentId, sessionId: t.sessionId });
         const sec = t.answerSec ?? (await (d.seconds ?? audioSeconds)(conv.buf, conv.mime).catch(() => null));
@@ -191,7 +195,11 @@ const routes: [string, RegExp, Handler][] = [
         done++;
       } catch (e) {
         logError("deferred stt failed", e);
-        errors.push({ turnId: t.id, status: e instanceof BazeError ? e.status : 0, detail: e instanceof BazeError ? e.detail || e.message : e instanceof Error ? e.message.slice(0, 200) : "error" });
+        errors.push({
+          turnId: t.id, status: e instanceof BazeError ? e.status : 0,
+          detail: e instanceof BazeError ? e.detail || e.message : e instanceof Error ? e.message.slice(0, 200) : "error",
+          storedBytes, sentBytes, mime: t.answerMime,
+        });
         if (e instanceof BazeError && e.code === "no_credit") break;
       }
     }

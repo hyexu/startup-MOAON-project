@@ -23,8 +23,8 @@ export default function Sessions({ id }: { id: number }) {
           <span>글로 옮기지 못하고 미뤄 둔 녹음이 {deferred}개 있습니다.</span>
           <div><button className="go" onClick={async () => {
             try {
-              const r = await adminApi<{ done: number; left: number; errors: { turnId: number; status: number; detail: string }[] }>("POST", `/parents/${id}/transcribe-deferred`);
-              const why = r.errors.length ? ` 실패 이유: ${[...new Set(r.errors.map((x) => `${x.detail || "알 수 없음"} (${x.status})`))].join(" / ")}` : "";
+              const r = await adminApi<{ done: number; left: number; errors: { turnId: number; status: number; detail: string; storedBytes: number | null; sentBytes: number | null; mime: string | null }[] }>("POST", `/parents/${id}/transcribe-deferred`);
+              const why = r.errors.length ? ` 실패 이유: ${r.errors.map((x) => `[${x.mime ?? "?"}, 저장 ${x.storedBytes ?? "?"}바이트 → 전송 ${x.sentBytes ?? "?"}바이트] ${x.detail || "알 수 없음"} (${x.status})`).join(" / ")}` : "";
               setMsg(`${r.done}개를 글로 옮겼습니다. 남은 것 ${r.left}개.${why}`); await load();
             }
             catch (e) { setMsg((e as Error).message === "ai_paused" ? "AI가 멈춰 있어 지금은 옮길 수 없습니다." : (e as Error).message); }
