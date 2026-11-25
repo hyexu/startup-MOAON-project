@@ -179,13 +179,18 @@ const routes: [string, RegExp, Handler][] = [
     if ((await aiMode(d.db, d.baze)).paused) return bad("ai_paused", 409);
     const waiting = await d.db.select().from(turns)
       .where(and(eq(turns.parentId, parentId), eq(turns.stt, "deferred"), isNotNull(turns.answerAudioPath))).orderBy(asc(turns.id));
-    let done = 0;
+    let done = 0, empty = 0;
     const errors: { turnId: number; status: number; detail: string; storedBytes: number | null; sentBytes: number | null; mime: string | null }[] = [];
     for (const t of waiting) {
       let storedBytes: number | null = null, sentBytes: number | null = null;
       try {
         const raw = await d.storage.get(t.answerAudioPath!);
         storedBytes = raw.length;
+        if (raw.length === 0) {
+          await d.db.update(turns).set({ stt: "empty", transcript: "" }).where(eq(turns.id, t.id));
+          done++; empty++;
+          continue;
+        }
         const conv = await (d.convert ?? toSttFormat)(raw, t.answerMime ?? "audio/webm");
         sentBytes = conv.buf.length;
         const r = await d.baze.transcribe(conv.buf, conv.filename, conv.mime);
@@ -203,7 +208,7 @@ const routes: [string, RegExp, Handler][] = [
         if (e instanceof BazeError && e.code === "no_credit") break;
       }
     }
-    return ok({ done, left: waiting.length - done, errors });
+    return ok({ done, empty, left: waiting.length - done, errors });
   }],
 ];
 

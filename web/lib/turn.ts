@@ -20,6 +20,8 @@ const CLAIM_STALE_SEC = 110;
 const WAIT_MAX_SEC = 100;
 const RESUME_HOURS = 24;
 
+class EmptyRecording extends Error {}
+
 export class NotFound extends Error {
   constructor() { super("not found"); this.name = "NotFound"; }
 }
@@ -211,6 +213,7 @@ export async function completeTurn(d: TurnDeps, a: CompleteArgs): Promise<TurnOu
       stt = "deferred";
       try {
         const raw = await d.storage.get(a.audioPath);
+        if (raw.length === 0) throw new EmptyRecording();
         const conv = await (d.convert ?? toSttFormat)(raw, a.mime);
         answerSec = await (d.seconds ?? audioSeconds)(conv.buf, conv.mime).catch(() => null);
         if (!mode.paused) {
@@ -225,9 +228,13 @@ export async function completeTurn(d: TurnDeps, a: CompleteArgs): Promise<TurnOu
           }
         }
       } catch (e) {
-        // A recording we cannot read or convert must not trap the parent: keep it for the operator and move on.
-        stt = "failed";
-        logError("audio read/convert failed", e);
+        if (e instanceof EmptyRecording) {
+          stt = "empty"; // nothing was recorded (e.g. "다 했어요" right away): ask the same question again
+        } else {
+          // A recording we cannot read or convert must not trap the parent: keep it for the operator and move on.
+          stt = "failed";
+          logError("audio read/convert failed", e);
+        }
       }
     }
     await d.db.update(turns).set({

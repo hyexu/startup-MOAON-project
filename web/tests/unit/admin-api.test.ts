@@ -138,7 +138,7 @@ describe("credits and AI pause", () => {
     expect((await s.call("POST", `/parents/${s.id}/transcribe-deferred`)).status).toBe(409);
     await s.call("PUT", "/ai-pause", { paused: false });
     const r = (await s.call("POST", `/parents/${s.id}/transcribe-deferred`)).json as { done: number; left: number; errors: unknown[] };
-    expect(r).toEqual({ done: 2, left: 0, errors: [] });
+    expect(r).toEqual({ done: 2, empty: 0, left: 0, errors: [] });
     expect(s.calls.transcribe).toBe(2);
     const rows = await s.db.select().from(turns).where(eq(turns.parentId, s.id));
     expect(rows.filter((t) => t.stt === "done").map((t) => t.transcript)).toEqual(["녹음 내용", "녹음 내용"]);
@@ -172,5 +172,15 @@ describe("deferred transcription errors", () => {
     expect(r.done).toBe(0);
     expect(r.errors).toHaveLength(2);
     expect(r.errors[0]).toMatchObject({ status: 400, detail: "Audio duration could not be read", storedBytes: 1, sentBytes: 1, mime: "audio/webm" });
+  });
+});
+
+describe("deferred empty recordings", () => {
+  it("marks 0-byte recordings as empty instead of failing forever", async () => {
+    const s = await withTurns();
+    await s.deps.storage.put(`a/${s.id}/1.webm`, Buffer.alloc(0), "audio/webm");
+    const r = (await s.call("POST", `/parents/${s.id}/transcribe-deferred`)).json as { done: number; left: number; empty: number };
+    expect(r).toMatchObject({ done: 2, empty: 1, left: 0 });
+    expect(s.calls.transcribe).toBe(1);
   });
 });

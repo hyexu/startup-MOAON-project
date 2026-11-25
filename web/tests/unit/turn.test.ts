@@ -201,3 +201,18 @@ describe("review fixes: turn pipeline", () => {
     expect(done.transcript).toBe("감나무가 있었어요");
   });
 });
+
+describe("empty recordings", () => {
+  it("treats a 0-byte recording as no answer and asks again, without calling STT", async () => {
+    const s = await setup();
+    const first = await startSession(s.deps, s.p.id);
+    const path = `a/${s.p.id}/${first.turn.turnId}.m4a`;
+    await s.storage.put(path, Buffer.alloc(0), "audio/mp4");
+    const before = s.calls.transcribe;
+    const next = await completeTurn(s.deps, { parentId: s.p.id, turnId: first.turn.turnId, audioPath: path, mime: "audio/mp4", command: null });
+    expect(s.calls.transcribe).toBe(before);
+    expect(next.question.startsWith(EMPTY_ANSWER_PREFIX)).toBe(true);
+    const [done] = await s.db.select().from(turns).where(eq(turns.id, first.turn.turnId));
+    expect(done.stt).toBe("empty");
+  });
+});
