@@ -137,8 +137,8 @@ describe("credits and AI pause", () => {
     await s.call("PUT", "/ai-pause", { paused: true });
     expect((await s.call("POST", `/parents/${s.id}/transcribe-deferred`)).status).toBe(409);
     await s.call("PUT", "/ai-pause", { paused: false });
-    const r = (await s.call("POST", `/parents/${s.id}/transcribe-deferred`)).json as { done: number; left: number };
-    expect(r).toEqual({ done: 2, left: 0 });
+    const r = (await s.call("POST", `/parents/${s.id}/transcribe-deferred`)).json as { done: number; left: number; errors: unknown[] };
+    expect(r).toEqual({ done: 2, left: 0, errors: [] });
     expect(s.calls.transcribe).toBe(2);
     const rows = await s.db.select().from(turns).where(eq(turns.parentId, s.id));
     expect(rows.filter((t) => t.stt === "done").map((t) => t.transcript)).toEqual(["녹음 내용", "녹음 내용"]);
