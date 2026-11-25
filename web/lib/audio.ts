@@ -8,7 +8,7 @@ const FFMPEG = (ffmpegStatic as unknown as string) || "ffmpeg";
 
 function run(args: string[]): Promise<{ stderr: string }> {
   return new Promise((resolve, reject) => {
-    execFile(FFMPEG, ["-hide_banner", "-nostdin", ...args], { maxBuffer: 64 * 1024 * 1024 }, (err, _out, stderr) => {
+    execFile(/*turbopackIgnore: true*/ FFMPEG, ["-hide_banner", "-nostdin", ...args], { maxBuffer: 64 * 1024 * 1024 }, (err, _out, stderr) => {
       if (err) reject(new Error(`ffmpeg failed: ${String(stderr).slice(-300)}`));
       else resolve({ stderr: String(stderr) });
     });

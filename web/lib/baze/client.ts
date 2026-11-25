@@ -19,6 +19,7 @@ function codeFor(status: number): BazeErrorCode {
   return "server";
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- the SDK and test fakes share only this call shape
 type AnthropicLike = { messages: { create: (body: any) => Promise<any> } };
 
 export type MessageArgs = {
